@@ -27,3 +27,128 @@ args->x_end   = args->x_start + x_segment_width;
 ### Результаты
 
 <img width="235" height="471" alt="image" src="https://github.com/user-attachments/assets/73c76934-1a2a-4fae-b01b-6146d4649715" />
+
+# 2. Read-write lock
+
+## Алгоритм (my `rwlock`)
+
+### Общая идея
+
+- Вся структура защищена одним **мьютексом** `mutex`.
+- Используются две **условные переменные**:
+  - `r_cv` — ожидание читателей
+  - `w_cv` — ожидание писателей
+- Состояние:
+  - `r_locked_c` — сколько читателей держат блокировку сейчас
+  - `w_locked` — держит ли блокировку писатель (0/1)
+  - `rlock_wait_c`, `wlock_wait_c` — сколько потоков ждут `rdlock`/`wrlock`
+- Ожидание выполняется через `while (...) pthread_cond_wait(...)` (учитывает ложные пробуждения).
+- Политика — **writer-preference**: если есть ожидающий писатель, новые читатели не заходят, чтобы не было голодания писателей.
+
+### `wrlock()`
+
+- Захватываем `mutex`, увеличиваем `wlock_wait_c`.
+- Ждём, пока **нет активного писателя** (`w_locked == 0`) и **нет активных читателей** (`r_locked_c == 0`).
+- Уменьшаем `wlock_wait_c`, выставляем `w_locked = 1`.
+- Освобождаем `mutex`.
+
+### `rdlock()`
+
+- Захватываем `mutex`, увеличиваем `rlock_wait_c`.
+- Ждём, пока **нет активного писателя** (`w_locked == 0`) и **нет ожидающих писателей** (`wlock_wait_c == 0`).
+- Уменьшаем `rlock_wait_c`, увеличиваем `r_locked_c`.
+- Освобождаем `mutex`.
+
+### `unlock()`
+
+- Захватываем `mutex`.
+- Если блокировку держал **писатель**: сбрасываем `w_locked = 0`.
+- Если блокировку держал **читатель**: уменьшаем `r_locked_c`.
+- Пробуждение:
+  - если есть ожидающие писатели и блокировка полностью свободна — будим **одного** писателя (`signal(w_cv)`),
+  - иначе будим **всех** читателей (`broadcast(r_cv)`).
+- Освобождаем `mutex`.
+
+## Результаты
+
+Тестирование: **80000** ключей, **1500** операций, коэффициенты **0.5** для поиска и вставки (удаление = 0), число потоков: **1**, **4**, **8**.
+
+**1 поток (pthread)**
+
+```text
+Inserted 80000 keys in empty list
+Rwlock implementation: pthread
+Elapsed time = 6.793249e-01 seconds
+Total ops = 1500
+member ops = 800
+insert ops = 700
+delete ops = 0
+```
+
+**1 поток (my)**
+
+```text
+Inserted 80000 keys in empty list
+Rwlock implementation: my
+[MY] Elapsed time = 7.462749e-01 seconds
+[MY] Total ops = 1500
+[MY] member ops = 800
+[MY] insert ops = 700
+[MY] delete ops = 0
+```
+
+**4 потока (pthread)**
+
+```text
+Inserted 80000 keys in empty list
+Rwlock implementation: pthread
+Elapsed time = 5.294771e-01 seconds
+Total ops = 1500
+member ops = 767
+insert ops = 733
+delete ops = 0
+```
+
+**4 потока (my)**
+
+```text
+Inserted 80000 keys in empty list
+Rwlock implementation: my
+[MY] Elapsed time = 4.557230e-01 seconds
+[MY] Total ops = 1500
+[MY] member ops = 767
+[MY] insert ops = 733
+[MY] delete ops = 0
+```
+
+**8 потоков (pthread)**
+
+```text
+Inserted 80000 keys in empty list
+Rwlock implementation: pthread
+Elapsed time = 5.615220e-01 seconds
+Total ops = 1500
+member ops = 752
+insert ops = 744
+delete ops = 0
+```
+
+**8 потоков (my)**
+
+```text
+Inserted 80000 keys in empty list
+Rwlock implementation: my
+[MY] Elapsed time = 4.871681e-01 seconds
+[MY] Total ops = 1500
+[MY] member ops = 752
+[MY] insert ops = 744
+[MY] delete ops = 0
+```
+
+## Выводы
+
+- В **однопоточном** режиме библиотечный `pthread_rwlock_t` оказался быстрее (0.679 c против 0.746 c), что ожидаемо из‑за меньших накладных расходов.
+- В **многопоточном** режиме собственная реализация показывает лучшую производительность:
+  - 4 потока: 0.529 c → 0.456 c (примерно **−14%**)
+  - 8 потоков: 0.562 c → 0.487 c (примерно **−13%**)
+- Итог: `my_rwlock_t` в этих тестах лучше масштабируется при росте числа потоков и использует **приоритет писателей**, снижая риск голодания писателей при большом числе читателей.
